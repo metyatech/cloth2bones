@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from cloth2bones.body_motion import validate_rig_pose_contract  # noqa: E402
+from cloth2bones.body_motion import sample_indices, validate_rig_pose_contract  # noqa: E402
 
 
 def _args() -> argparse.Namespace:
@@ -123,8 +123,8 @@ def main() -> None:
             "mean_rms": float(np.mean([value["rms"] for value in pre_export])),
             "max_rms": float(np.max([value["rms"] for value in pre_export])),
             "max_point_error": float(np.max([value["max_point_error"] for value in pre_export])),
-            "samples": [pre_export[index] for index in (0, 60, 120, 180, 239)],
-            "manual_skinning": {"mean_rms": float(np.mean([value["rms"] for value in manual])), "samples": [manual[index] for index in (0, 60, 120, 180, 239)]},
+            "samples": [pre_export[index] for index in sample_indices(len(pre_export))],
+            "manual_skinning": {"mean_rms": float(np.mean([value["rms"] for value in manual])), "samples": [manual[index] for index in sample_indices(len(manual))]},
         }
         Path(args.report).resolve().write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(json.dumps(report, indent=2))

@@ -309,3 +309,11 @@ def frame_metrics(predicted: np.ndarray, teacher: np.ndarray) -> dict[str, float
         "max_point_error": float(np.max(distances)),
         "mean": float(np.mean(distances)),
     }
+
+
+def sample_indices(frame_count: int, anchors: tuple[int, ...] = (0, 60, 120, 180, 239)) -> list[int]:
+    """Return stable preview indices clipped to an arbitrary frame count."""
+
+    if frame_count < 1:
+        raise ValueError("frame_count must be positive")
+    return sorted({min(max(index, 0), frame_count - 1) for index in anchors})

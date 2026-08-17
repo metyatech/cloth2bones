@@ -13,6 +13,7 @@ from cloth2bones.body_motion import (
     project_transform_vectors,
     rotation_matrix_to_rotvec,
     rotvec_to_rotation_matrix,
+    sample_indices,
     transform_points,
     validate_rig_pose_contract,
 )
@@ -91,3 +92,13 @@ def test_pose_contract_rejects_mismatched_weights() -> None:
         assert "weights" in str(error)
     else:
         raise AssertionError("Mismatched rig weights were accepted")
+
+
+def test_sample_indices_support_short_sequences_and_reject_empty() -> None:
+    assert sample_indices(120) == [0, 60, 119]
+    try:
+        sample_indices(0)
+    except ValueError as error:
+        assert "positive" in str(error)
+    else:
+        raise AssertionError("Empty sequences must be rejected")

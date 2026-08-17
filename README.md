@@ -164,6 +164,37 @@ Upper_arm.L/R drivers. A motion-space holdout can still fail even when
 interpolation and contiguous validation improve; that failure is reported and
 must not be hidden.
 
+## Experimental PoC 3.2: cross-sequence holdout
+
+PoC 3.2 evaluates complete unseen Body Motion sequences rather than nearby
+frames from one sequence. The official ClothTransformer Human Garment audit
+found 56 trajectories but only 54 cloth topology/rest groups; the only repeated
+groups were byte-identical duplicate files. It therefore does not contain a
+non-duplicate same-garment, different-motion group suitable for this test.
+
+The repository includes a controlled synthetic fallback generator that shares
+one rest mesh, 50-bone weights, bone indexing, and body topology across four
+distinct sequences. It trains on A+B+C and holds out D. The fallback is an
+algorithm contract test, not a physical-cloth generalization claim. See
+[`docs/cross_sequence_poc.md`](docs/cross_sequence_poc.md) for the data audit,
+LOSO protocol, leakage checks, model comparison, and Blender artifact steps.
+
+For a one-command rerun with local inputs:
+
+```powershell
+pwsh ./tools/run_cross_sequence_poc.ps1 `
+  -ReferenceNpz ./input/sim_00000.npz `
+  -CommonPoseNpz ./out/body_local_poc/clean_rig_poses.npz `
+  -SyntheticRoot ./out/cross_sequence_data/synthetic_same_rig `
+  -OutputRoot ./out/cross_sequence_poc
+```
+
+The analysis compares linear, ridge, polynomial, nearest, RBF, local-ridge,
+and velocity-augmented models, performs leave-one-sequence-out folds, checks
+50/32/20/16/8 bones, and writes numeric SVG plots. The current controlled
+fixture's primary D holdout is documented as an experimental result only; it
+does not establish arbitrary VRChat-pose inference for production garments.
+
 ## Verification
 
 ```powershell

@@ -10,6 +10,9 @@ Describe 'Cloth2Bones public script contract' {
         Test-Path (Join-Path $PSScriptRoot '..\tools\body_motion_poc.py') | Should -BeTrue
         Test-Path (Join-Path $PSScriptRoot '..\tools\run_body_local_poc.ps1') | Should -BeTrue
         Test-Path (Join-Path $PSScriptRoot '..\tools\body_local_poc.py') | Should -BeTrue
+        Test-Path (Join-Path $PSScriptRoot '..\tools\run_cross_sequence_poc.ps1') | Should -BeTrue
+        Test-Path (Join-Path $PSScriptRoot '..\tools\cross_sequence_poc.py') | Should -BeTrue
+        Test-Path (Join-Path $PSScriptRoot '..\tools\audit_cross_sequence_dataset.py') | Should -BeTrue
     }
 
     It 'documents the same-rig body-local safety contract' {

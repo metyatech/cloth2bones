@@ -5,10 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import bpy
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from cloth2bones.body_motion import sample_indices  # noqa: E402
 
 
 def _args() -> argparse.Namespace:
@@ -69,7 +76,7 @@ def main() -> None:
         "max_rms": float(np.max([value["rms"] for value in frames])),
         "max_point_error": float(np.max([value["max_point_error"] for value in frames])),
         "p95_point_error": float(np.percentile([value["max_point_error"] for value in frames], 95)),
-        "samples": [{"frame": args.start + index, **frames[index]} for index in (0, 60, 120, 180, 239)],
+        "samples": [{"frame": args.start + index, **frames[index]} for index in sample_indices(len(frames))],
     }
     output = Path(args.json).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

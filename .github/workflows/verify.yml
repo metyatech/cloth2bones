@@ -1,0 +1,34 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install quality tools
+        shell: pwsh
+        run: |
+          python -m pip install -e . -r requirements-dev.txt
+          npm ci
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          Install-Module Pester -Scope CurrentUser -Force
+      - name: Run canonical verification
+        shell: pwsh
+        run: ./tools/verify.ps1
+      - name: Audit Python dependencies
+        shell: pwsh
+        run: python -m pip_audit -r requirements-dev.txt --strict --timeout 15 --progress-spinner off

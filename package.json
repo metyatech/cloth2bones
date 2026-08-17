@@ -1,0 +1,7 @@
+{
+  "name": "cloth2bones-quality-tools",
+  "private": true,
+  "devDependencies": {
+    "markdownlint-cli2": "0.23.2"
+  }
+}

@@ -1,0 +1,40 @@
+# Python and tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.venv/
+node_modules/
+build/
+dist/
+*.egg-info/
+
+# Local Blender/Unity/Dem Bones dependencies
+blender*/
+DemBones.exe
+dem-bones/
+unity_verify/
+
+# Large or externally licensed input/output assets
+*.fbx
+*.abc
+*.obj
+*.npz
+*.bgeo*
+out/
+outputs/
+reports/
+logs/
+*.log
+*.png
+*.jpg
+*.mp4
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.user
+*.suo

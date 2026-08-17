@@ -11,7 +11,9 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 from audit_cross_sequence_dataset import _topology_digests  # noqa: E402
-from cross_sequence_poc import _fit_model, _metrics, _spatial_regions, _vectors_to_transforms  # noqa: E402
+from cross_sequence_poc import _fit_bone_transforms, _fit_model, _metrics, _spatial_regions, _vectors_to_transforms  # noqa: E402
+
+from cloth2bones.body_motion import apply_skinning  # noqa: E402
 
 
 def test_topology_canonical_hash_ignores_face_order_and_winding() -> None:
@@ -52,3 +54,30 @@ def test_prediction_vectors_project_to_rigid_transforms_and_metrics_are_complete
     metrics = _metrics(np.zeros((3, 4, 3)), np.ones((3, 4, 3)))
     assert len(metrics["per_frame_rms"]) == 3
     assert "max_point_error" in metrics
+
+
+def test_weighted_bone_fit_handles_framewise_skinning_shapes() -> None:
+    rest = np.asarray(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 1.0, 0.0],
+            [2.0, 0.0, 1.0],
+            [3.0, 0.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    weights = np.zeros((len(rest), 2), dtype=np.float64)
+    weights[:4, 0] = 1.0
+    weights[4:, 1] = 1.0
+    transforms = np.tile(np.eye(4, dtype=np.float64), (1, 2, 1, 1))
+    transforms[0, 0, :3, 3] = (0.1, -0.03, 0.02)
+    transforms[0, 1, :3, 3] = (-0.04, 0.06, 0.01)
+    target = apply_skinning(rest, weights, transforms)
+    fitted = _fit_bone_transforms(rest, target, weights, iterations=1)
+    reconstructed = apply_skinning(rest, weights, fitted)
+    assert reconstructed.shape == target.shape
+    assert float(np.sqrt(np.mean((reconstructed - target) ** 2))) < 1.0e-8

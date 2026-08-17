@@ -120,7 +120,7 @@ def _fit_bone_transforms(rest: np.ndarray, cloth: np.ndarray, weights: np.ndarra
         target = cloth[frame_index]
         current = fitted[frame_index]
         for _ in range(iterations):
-            predicted = apply_skinning(rest, weights, current)
+            predicted = apply_skinning(rest, weights, current)[0]
             for bone in range(bone_count):
                 influence = weights[:, bone]
                 mask = influence > 1.0e-4
@@ -129,7 +129,7 @@ def _fit_bone_transforms(rest: np.ndarray, cloth: np.ndarray, weights: np.ndarra
                 without_bone = predicted - influence[:, None] * (
                     rest @ current[bone, :3, :3].T + current[bone, :3, 3]
                 )
-                desired = (target - without_bone[mask]) / influence[mask, None]
+                desired = (target[mask] - without_bone[mask]) / influence[mask, None]
                 current[bone] = _weighted_kabsch(rest[mask], desired, influence[mask] ** 2)
         fitted[frame_index] = current
     return fitted

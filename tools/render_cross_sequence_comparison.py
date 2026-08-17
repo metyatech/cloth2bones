@@ -27,7 +27,7 @@ def _import_mesh(path: Path) -> tuple[list[bpy.types.Object], bpy.types.Object]:
     before = set(bpy.context.scene.objects)
     bpy.ops.import_scene.fbx(filepath=str(path), use_anim=True, automatic_bone_orientation=False)
     objects = [obj for obj in bpy.context.scene.objects if obj not in before]
-    meshes = [obj for obj in objects if obj.type == "MESH" and any(mod.type == "ARMATURE" for mod in obj.modifiers)]
+    meshes = [obj for obj in objects if obj.type == "MESH"]
     if len(meshes) != 1:
         raise RuntimeError(f"Expected one skinned mesh in {path}, got {len(meshes)}")
     return objects, meshes[0]

@@ -7,9 +7,14 @@ from cloth2bones.body_motion import (
     body_driver_features,
     fit_ridge_mapping,
     infer_axis_transform,
+    invert_rigid_transforms,
     kabsch_transform,
     predict_ridge_mapping,
     project_transform_vectors,
+    rotation_matrix_to_rotvec,
+    rotvec_to_rotation_matrix,
+    transform_points,
+    validate_rig_pose_contract,
 )
 
 
@@ -57,3 +62,32 @@ def test_infer_signed_axis_permutation() -> None:
     matrix = np.asarray([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]])
     target = source @ matrix.T
     assert np.allclose(infer_axis_transform(source, target), matrix)
+
+
+def test_rigid_canonicalization_removes_global_motion() -> None:
+    rest = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]])
+    transforms = np.tile(np.eye(4), (2, 1, 1))
+    transforms[1, :3, :3] = np.asarray([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    transforms[1, :3, 3] = [4.0, -2.0, 1.0]
+    animated = transform_points(rest, transforms)
+    recovered = np.stack([kabsch_transform(rest, frame) for frame in animated])
+    canonical = transform_points(animated, invert_rigid_transforms(recovered))
+    assert np.allclose(canonical, rest[None, ...], atol=1.0e-10)
+
+
+def test_rotation_vector_round_trip() -> None:
+    rotation = np.asarray([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    vector = rotation_matrix_to_rotvec(rotation)
+    assert np.allclose(rotvec_to_rotation_matrix(vector), rotation, atol=1.0e-10)
+
+
+def test_pose_contract_rejects_mismatched_weights() -> None:
+    rest = np.zeros((2, 3), dtype=np.float64)
+    weights = np.asarray([[1.0, 0.0], [0.0, 1.0]])
+    mismatched = weights[:, ::-1]
+    try:
+        validate_rig_pose_contract(rest, mismatched, rest, weights)
+    except ValueError as error:
+        assert "weights" in str(error)
+    else:
+        raise AssertionError("Mismatched rig weights were accepted")

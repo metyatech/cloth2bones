@@ -8,5 +8,13 @@ Describe 'Cloth2Bones public script contract' {
     It 'has explicit converter entry points' {
         Test-Path (Join-Path $PSScriptRoot '..\tools\run_cloth2bones.ps1') | Should -BeTrue
         Test-Path (Join-Path $PSScriptRoot '..\tools\body_motion_poc.py') | Should -BeTrue
+        Test-Path (Join-Path $PSScriptRoot '..\tools\run_body_local_poc.ps1') | Should -BeTrue
+        Test-Path (Join-Path $PSScriptRoot '..\tools\body_local_poc.py') | Should -BeTrue
+    }
+
+    It 'documents the same-rig body-local safety contract' {
+        $content = Get-Content -Raw (Join-Path $PSScriptRoot '..\tools\apply_body_driven_poses.py')
+        $content | Should -Match 'validate_rig_pose_contract'
+        $content | Should -Match 'export poses from the same clean rig'
     }
 }

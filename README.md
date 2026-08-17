@@ -130,6 +130,40 @@ point error `2.8409`; the global-Kabsch body driver reached RMS `0.03893` and
 maximum point error `0.1465` on the held-out frames. These numbers are a
 reproducibility reference only; the dataset is not included in this repository.
 
+## Experimental PoC 3.1: body-local drivers
+
+The experimental body-local tool removes the frame-wise rigid transform of the
+whole collider before predicting cloth-bone transforms. It uses automatically
+discovered residual-motion regions and compares static rest, linear/ridge,
+polynomial, nearest-pose, RBF, and region-local models. It never supplies a
+frame number, time, animation progress, cloth vertex, or cloth teacher as a
+feature. It also evaluates contiguous, interleaved, and motion-space holdouts
+and benchmarks 50/32/20/16/8 bone reductions.
+
+Run it with explicit paths:
+
+```powershell
+pwsh ./tools/run_body_local_poc.ps1 `
+  -Npz ./input/sim_00000.npz `
+  -CleanFbx ./out/cloth_clean_rigid_50.fbx `
+  -BlenderExe 'C:/Program Files/Blender Foundation/Blender/blender.exe' `
+  -OutputRoot ./out/body_local_poc
+```
+
+The wrapper exports pose/weight data from the exact clean FBX passed to
+`-CleanFbx`, writes the canonicalized report and predicted FBX, checks the FBX
+against the canonical teacher, and renders comparison frames. A pose NPZ
+from another clean-rig export is rejected when its rest vertices or weights do
+not match the target FBX. See [`docs/body_local_poc.md`](docs/body_local_poc.md)
+for the protocol and interpretation.
+
+This is an experimental offline baseline, not arbitrary-pose humanoid cloth
+inference and not a finished VRChat runtime rig. The current dataset contains
+no semantic skeleton, so its collider regions are not yet stable Hips/Chest/
+Upper_arm.L/R drivers. A motion-space holdout can still fail even when
+interpolation and contiguous validation improve; that failure is reported and
+must not be hidden.
+
 ## Verification
 
 ```powershell

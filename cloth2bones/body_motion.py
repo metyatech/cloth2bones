@@ -109,6 +109,112 @@ def kabsch_transform(source: np.ndarray, target: np.ndarray) -> np.ndarray:
     return transform
 
 
+def invert_rigid_transforms(transforms: np.ndarray) -> np.ndarray:
+    """Invert one or more rigid 4x4 transforms."""
+
+    values = np.asarray(transforms, dtype=np.float64)
+    if values.shape[-2:] != (4, 4):
+        raise ValueError(f"Expected rigid transforms with trailing shape (4, 4), got {values.shape}")
+    inverse = np.zeros_like(values)
+    inverse[..., :3, :3] = np.swapaxes(values[..., :3, :3], -1, -2)
+    inverse[..., :3, 3] = -np.einsum("...ij,...j->...i", inverse[..., :3, :3], values[..., :3, 3])
+    inverse[..., 3, 3] = 1.0
+    return inverse
+
+
+def transform_points(points: np.ndarray, transforms: np.ndarray) -> np.ndarray:
+    """Apply a frame-wise rigid transform to points."""
+
+    values = np.asarray(points, dtype=np.float64)
+    matrices = np.asarray(transforms, dtype=np.float64)
+    if values.ndim not in (2, 3) or values.shape[-1] != 3:
+        raise ValueError(f"Points must have shape (N, 3) or (T, N, 3), got {values.shape}")
+    if matrices.shape[-2:] != (4, 4):
+        raise ValueError(f"Transforms must end in (4, 4), got {matrices.shape}")
+    if values.ndim == 2:
+        values = np.broadcast_to(values[None, ...], (len(matrices),) + values.shape)
+    if len(values) != len(matrices):
+        raise ValueError(f"Point and transform frame counts differ: {len(values)} vs {len(matrices)}")
+    return np.einsum("tij,tvj->tvi", matrices[:, :3, :3], values) + matrices[:, None, :3, 3]
+
+
+def validate_rig_pose_contract(
+    reference_rest: np.ndarray | None,
+    reference_weights: np.ndarray | None,
+    target_rest: np.ndarray,
+    target_weights: np.ndarray,
+    tolerance: float = 2.0e-4,
+) -> dict[str, float]:
+    """Validate that pose data was exported from the target rig."""
+
+    result: dict[str, float] = {}
+    if reference_rest is not None:
+        rest = np.asarray(reference_rest, dtype=np.float64)
+        target = np.asarray(target_rest, dtype=np.float64)
+        if rest.shape != target.shape:
+            raise ValueError(f"Pose rest shape {rest.shape} does not match target rig shape {target.shape}")
+        rest_error = float(np.max(np.abs(rest - target)))
+        if rest_error > tolerance:
+            raise ValueError(f"Pose rest vertices differ from target rig by {rest_error}")
+        result["rest_max_abs_error"] = rest_error
+    if reference_weights is not None:
+        weights = np.asarray(reference_weights, dtype=np.float64)
+        target = np.asarray(target_weights, dtype=np.float64)
+        if weights.shape != target.shape:
+            raise ValueError(f"Pose weight shape {weights.shape} does not match target rig shape {target.shape}")
+        weight_error = float(np.max(np.abs(weights - target)))
+        if weight_error > tolerance:
+            raise ValueError(f"Pose weights differ from target rig by {weight_error}")
+        result["weights_max_abs_error"] = weight_error
+    return result
+
+
+def rotation_matrix_to_rotvec(rotation: np.ndarray) -> np.ndarray:
+    """Convert rotation matrices to continuous axis-angle vectors."""
+
+    values = np.asarray(rotation, dtype=np.float64)
+    if values.shape[-2:] != (3, 3):
+        raise ValueError(f"Expected rotation matrices with trailing shape (3, 3), got {values.shape}")
+    flat = values.reshape(-1, 3, 3)
+    result = np.zeros((len(flat), 3), dtype=np.float64)
+    cosine = np.clip((np.trace(flat, axis1=1, axis2=2) - 1.0) * 0.5, -1.0, 1.0)
+    angles = np.arccos(cosine)
+    small = angles < 1.0e-6
+    result[small] = 0.5 * np.stack(
+        (flat[small, 2, 1] - flat[small, 1, 2], flat[small, 0, 2] - flat[small, 2, 0], flat[small, 1, 0] - flat[small, 0, 1]),
+        axis=1,
+    )
+    regular = ~small
+    if np.any(regular):
+        sine = np.sin(angles[regular])
+        skew_vector = np.stack(
+            (flat[regular, 2, 1] - flat[regular, 1, 2], flat[regular, 0, 2] - flat[regular, 2, 0], flat[regular, 1, 0] - flat[regular, 0, 1]),
+            axis=1,
+        )
+        result[regular] = skew_vector * (angles[regular] / (2.0 * sine))[:, None]
+    return result.reshape(values.shape[:-2] + (3,))
+
+
+def rotvec_to_rotation_matrix(rotvec: np.ndarray) -> np.ndarray:
+    """Convert axis-angle vectors to rotation matrices with Rodrigues' formula."""
+
+    values = np.asarray(rotvec, dtype=np.float64)
+    if values.shape[-1] != 3:
+        raise ValueError(f"Expected rotation vectors with trailing shape (3,), got {values.shape}")
+    flat = values.reshape(-1, 3)
+    result = np.tile(np.eye(3, dtype=np.float64), (len(flat), 1, 1))
+    angles = np.linalg.norm(flat, axis=1)
+    for index, vector in enumerate(flat):
+        if angles[index] < 1.0e-10:
+            skew = np.asarray([[0.0, -vector[2], vector[1]], [vector[2], 0.0, -vector[0]], [-vector[1], vector[0], 0.0]])
+            result[index] = np.eye(3) + skew
+            continue
+        axis = vector / angles[index]
+        skew = np.asarray([[0.0, -axis[2], axis[1]], [axis[2], 0.0, -axis[0]], [-axis[1], axis[0], 0.0]])
+        result[index] = np.eye(3) + np.sin(angles[index]) * skew + (1.0 - np.cos(angles[index])) * (skew @ skew)
+    return result.reshape(values.shape[:-1] + (3, 3))
+
+
 def body_driver_features(collision_vertices: np.ndarray) -> tuple[np.ndarray, DriverLayout]:
     """Fit region transforms and encode them as frame-wise body features.
 

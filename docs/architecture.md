@@ -35,6 +35,21 @@ This is deliberately a research baseline. It is not yet a semantic mapping
 from `UpperArm.L` to named cloth bones because the input NPZ has collider
 vertices but no skeleton/joint transform stream.
 
+### PoC 3.1 body-local extension
+
+`body_local_poc.py` first fits and removes the collider's frame-wise global
+Kabsch transform. It then clusters rest position plus canonical residual motion
+into connected collider regions and predicts a local rotation-vector plus
+translation target for each cloth bone. Evaluation includes contiguous,
+interleaved, and motion-space holdouts. Nearest body-feature pose is a useful
+interpolation baseline for the current sample, while motion-space failure is
+kept as an explicit extrapolation warning.
+
+The pose export and the target FBX are an atomic pair: rest vertices and
+normalized vertex weights are checked before animation is authored. Identical
+bone names are not sufficient because FBX round-trips can preserve names while
+changing cluster order or assignments.
+
 ## Runtime target
 
 The eventual avatar artifact should contain a small fixed helper hierarchy,

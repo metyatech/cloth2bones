@@ -19,6 +19,14 @@ Use `compare_fbx_to_abc.py` at frame 1 before increasing the bone count.
 will fail the explicit rest-vertex check. Fix the source convention instead of
 adding a hidden scale in the regression script.
 
+## Pose NPZ weights do not match the target FBX
+
+Export `dump_blender_rig_poses.py` from the exact clean FBX passed to
+`apply_body_driven_poses.py`. Do not reuse a pose NPZ from another clean-rig
+export merely because its armature has the same bone names. The application
+tool compares normalized vertex weights as well as rest vertices and rejects a
+mismatch before producing an FBX.
+
 ## Body validation is worse than the rest baseline
 
 Inspect the driver-region masks and the train/validation split. The current

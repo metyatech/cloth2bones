@@ -197,8 +197,11 @@ VRChat currently allows VRC Constraints, Animator, VRC PhysBones, and
 VRCPhysBoneColliders on avatars, while arbitrary custom components/scripts are
 not an upload-safe dependency. The intended runtime split is body-driven
 helper-bone motion for large pose-dependent folds plus PhysBones for secondary
-motion. See [`docs/architecture.md`](docs/architecture.md) for the boundary
-between the offline exporter and that runtime design.
+motion. Prefer VRChat's own [Constraints](https://creators.vrchat.com/common-components/constraints/)
+over Unity constraints for avatar content, and check the [allowed avatar
+components](https://creators.vrchat.com/avatars/whitelisted-avatar-components/)
+before shipping. See [`docs/architecture.md`](docs/architecture.md) for the
+boundary between the offline exporter and that runtime design.
 
 ## License and attribution
 

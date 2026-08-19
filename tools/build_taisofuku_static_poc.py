@@ -1,4 +1,4 @@
-"""Build the Taisofuku static-equilibrium visual review Blend and previews."""
+"""Build the Taisofuku static-equilibrium visual review Blend."""
 
 from __future__ import annotations
 
@@ -39,7 +39,21 @@ PARAMETERS = {
     "balanced": EquilibriumParameters(edge=5000.0, smooth=6.0, tether=60.0, gravity=0.45, collision=50000.0),
     "soft": EquilibriumParameters(edge=3000.0, smooth=3.0, tether=30.0, gravity=0.60, collision=50000.0),
 }
-COLLECTION_NAMES = ("RYUON_A", "A_LBS_BASELINE", "A_OPT_STIFF", "A_OPT_BALANCED", "A_OPT_SOFT")
+BODY_COLLECTION = "00_RYUON_A_BODY"
+DEFAULT_VISIBLE_COLLECTION = "03_A_REVIEW_BALANCED"
+COLLECTION_NAMES = (BODY_COLLECTION, "01_A_BASELINE_NORMAL", "02_A_REVIEW_STIFF", DEFAULT_VISIBLE_COLLECTION, "04_A_REVIEW_SOFT")
+DISPLAY_COLLECTIONS = {
+    "baseline": "01_A_BASELINE_NORMAL",
+    "stiff": "02_A_REVIEW_STIFF",
+    "balanced": DEFAULT_VISIBLE_COLLECTION,
+    "soft": "04_A_REVIEW_SOFT",
+}
+DISPLAY_OBJECTS = {
+    "baseline": "Taisofuku_Shirt_A_Baseline_Normal",
+    "stiff": "Taisofuku_Shirt_A_Review_Stiff",
+    "balanced": "Taisofuku_Shirt_A_Review_Balanced",
+    "soft": "Taisofuku_Shirt_A_Review_Soft",
+}
 
 
 def _args() -> argparse.Namespace:
@@ -253,6 +267,8 @@ def _candidate_report(
     nan_count = int(np.isnan(result.positions).sum() + np.isnan(result.displacement).sum())
     inf_count = int(np.isinf(result.positions).sum() + np.isinf(result.displacement).sum())
     edge_strain = _edge_metrics(main_rest, result.positions, main_edges)
+    topology_preserved = output_vertices == EXPECTED_SHIRT_VERTICES and output_faces == EXPECTED_SHIRT_FACES
+    review_export_eligible = nan_count == 0 and inf_count == 0 and topology_preserved
     valid_numeric = (
         nan_count == 0
         and inf_count == 0
@@ -261,6 +277,11 @@ def _candidate_report(
         and float(np.max(correction_magnitude)) <= 0.10
         and edge_strain["max_absolute"] <= 0.20
     )
+    numeric_warnings = []
+    if float(np.max(correction_magnitude)) > 0.10:
+        numeric_warnings.append("max_correction_displacement_exceeds_0.10_m")
+    if edge_strain["max_absolute"] > 0.20:
+        numeric_warnings.append("max_absolute_edge_strain_exceeds_0.20")
     weighted_energies = {
         "edge": parameters.edge * result.energies["edge"],
         "smooth": parameters.smooth * result.energies["smooth"],
@@ -270,6 +291,8 @@ def _candidate_report(
     }
     return {
         "name": name,
+        "display_collection": DISPLAY_COLLECTIONS[name],
+        "display_object": DISPLAY_OBJECTS[name],
         "parameter_set": {
             "edge": parameters.edge,
             "smooth": parameters.smooth,
@@ -301,8 +324,10 @@ def _candidate_report(
         "inf_count": inf_count,
         "output_vertices": output_vertices,
         "output_faces": output_faces,
-        "topology_preserved": output_vertices == EXPECTED_SHIRT_VERTICES and output_faces == EXPECTED_SHIRT_FACES,
+        "topology_preserved": topology_preserved,
         "valid_numeric": valid_numeric,
+        "review_export_eligible": review_export_eligible,
+        "numeric_warnings": numeric_warnings,
         "numeric_gate": {
             "max_correction_displacement_m": 0.10,
             "max_absolute_edge_strain": 0.20,
@@ -343,79 +368,10 @@ def _static_duplicate(
     return result
 
 
-def _world_bounds(objects: list[bpy.types.Object]) -> tuple[Vector, Vector]:
-    corners = [obj.matrix_world @ Vector(corner) for obj in objects for corner in obj.bound_box]
-    if not corners:
-        raise RuntimeError("Cannot render a scene without mesh bounds")
-    minimum = Vector((min(point.x for point in corners), min(point.y for point in corners), min(point.z for point in corners)))
-    maximum = Vector((max(point.x for point in corners), max(point.y for point in corners), max(point.z for point in corners)))
-    return minimum, maximum
-
-
-def _look_at(camera: bpy.types.Object, target: Vector) -> None:
-    camera.rotation_euler = (target - camera.location).to_track_quat("-Z", "Y").to_euler()
-
-
 def _set_collection_visibility(collections: dict[str, bpy.types.Collection], active: str) -> None:
     for name, collection in collections.items():
-        collection.hide_viewport = name != "RYUON_A" and name != active
-        collection.hide_render = name != "RYUON_A" and name != active
-
-
-def _render_previews(collections: dict[str, bpy.types.Collection], body: bpy.types.Object, output_dir: Path) -> list[str]:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    scene = bpy.context.scene
-    scene.render.engine = "BLENDER_WORKBENCH"
-    scene.render.resolution_x = 512
-    scene.render.resolution_y = 512
-    scene.render.resolution_percentage = 100
-    scene.render.image_settings.file_format = "PNG"
-    scene.render.film_transparent = False
-    scene.display.shading.light = "STUDIO"
-    scene.display.shading.color_type = "MATERIAL"
-    scene.world.color = (0.025, 0.025, 0.025)
-    camera_data = bpy.data.cameras.new("STATIC_REVIEW_CAMERA_DATA")
-    camera = bpy.data.objects.new("STATIC_REVIEW_CAMERA", camera_data)
-    bpy.context.scene.collection.objects.link(camera)
-    scene.camera = camera
-    rendered: list[str] = []
-    view_directions = {
-        "front": (Vector((0.0, -1.0, 0.0)), None),
-        "back": (Vector((0.0, 1.0, 0.0)), None),
-        "left_underarm": (Vector((-1.0, -0.85, 0.08)).normalized(), -1.0),
-        "right_underarm": (Vector((1.0, -0.85, 0.08)).normalized(), 1.0),
-    }
-    filename_prefix = {
-        "A_LBS_BASELINE": "baseline",
-        "A_OPT_STIFF": "stiff",
-        "A_OPT_BALANCED": "balanced",
-        "A_OPT_SOFT": "soft",
-    }
-    for candidate_name, collection in collections.items():
-        if candidate_name == "RYUON_A":
-            continue
-        _set_collection_visibility(collections, candidate_name)
-        candidate_objects = [obj for obj in collection.objects if obj.type == "MESH"]
-        minimum, maximum = _world_bounds([body, *candidate_objects])
-        center = (minimum + maximum) * 0.5
-        extent = maximum - minimum
-        for view_name, (direction, side) in view_directions.items():
-            target = center
-            if side is not None:
-                target = center + Vector((side * extent.x * 0.22, -extent.y * 0.08, extent.z * 0.10))
-            distance = max(extent.length * 1.8, 1.0)
-            camera.location = target + direction * distance
-            _look_at(camera, target)
-            camera.data.type = "ORTHO"
-            camera.data.ortho_scale = max(extent.z * (0.68 if side is not None else 1.18), extent.x * 1.18, extent.y * 1.18, 0.1)
-            filename = f"{filename_prefix[candidate_name]}_{view_name}.png"
-            filepath = output_dir / filename
-            scene.render.filepath = str(filepath)
-            bpy.ops.render.render(write_still=True)
-            if not filepath.is_file() or filepath.stat().st_size <= 0:
-                raise RuntimeError(f"Workbench render did not produce a non-empty PNG: {filepath}")
-            rendered.append(str(filepath))
-    return rendered
+        collection.hide_viewport = name != BODY_COLLECTION and name != active
+        collection.hide_render = name != BODY_COLLECTION and name != active
 
 
 def _validate_source(source: Path) -> dict[str, object]:
@@ -467,7 +423,6 @@ def main() -> None:
     anchor = _anchor_weights(shirt, main_indices, main_rest)
     collision_points, collision_normals = _collision_associations(body, main_base_a, depsgraph)
 
-    candidate_results: dict[str, EquilibriumResult] = {}
     candidate_reports: dict[str, dict[str, object]] = {}
     candidate_positions: dict[str, np.ndarray] = {}
     for name, parameters in PARAMETERS.items():
@@ -480,7 +435,6 @@ def main() -> None:
             anchor,
             parameters,
         )
-        candidate_results[name] = result
         candidate_positions[name] = _propagate_to_full_mesh(full_rest, full_base_a, main_indices, main_rest, result.displacement)
         candidate_reports[name] = _candidate_report(
             name,
@@ -504,9 +458,9 @@ def main() -> None:
     )
     if not source_unchanged:
         raise RuntimeError("Source Blend changed during static equilibrium optimization")
-    valid_candidates = [name for name, report in candidate_reports.items() if report["valid_numeric"]]
+    review_export_candidates = [name for name, report in candidate_reports.items() if report["review_export_eligible"]]
     report_path = output_root / "static_equilibrium_report.json"
-    if not valid_candidates:
+    if not review_export_candidates:
         report_path.write_text(
             json.dumps(
                 {
@@ -515,36 +469,40 @@ def main() -> None:
                     "original_total_face_count": EXPECTED_SHIRT_FACES,
                     "main_component": {"vertices": len(main_indices), "faces": len(main_faces)},
                     "candidates": candidate_reports,
-                    "previews": [],
+                    "collections": list(COLLECTION_NAMES),
+                    "default_visible_collection": DEFAULT_VISIBLE_COLLECTION,
+                    "review_exported": False,
+                    "review_export_reason": "no_candidate_met_review_export_eligibility",
                     "review_blend": None,
+                    "previews": [],
                 },
                 indent=2,
             ),
             encoding="utf-8",
         )
-        raise RuntimeError(f"All static-equilibrium candidates failed the numeric safety gate; see {report_path}")
+        raise RuntimeError(f"All static-equilibrium candidates failed review export eligibility; see {report_path}")
 
     for obj in bpy.data.objects:
         obj.hide_viewport = True
         obj.hide_render = True
         obj.hide_set(True)
     collections = {name: _new_collection(name) for name in COLLECTION_NAMES}
-    body_a = _static_duplicate(body, _world_mesh_data(body, depsgraph)[0], collections["RYUON_A"], "ComeBody_A_Static")
-    _static_duplicate(shirt, full_base_a, collections["A_LBS_BASELINE"], "Taisofuku_Shirt_A_LBS_BASELINE")
+    _static_duplicate(body, _world_mesh_data(body, depsgraph)[0], collections[BODY_COLLECTION], "Ryuon_A_Body_Static")
+    _static_duplicate(shirt, full_base_a, collections[DISPLAY_COLLECTIONS["baseline"]], DISPLAY_OBJECTS["baseline"])
     for name in PARAMETERS:
-        collection_name = f"A_OPT_{name.upper()}"
-        _static_duplicate(shirt, candidate_positions[name], collections[collection_name], f"Taisofuku_Shirt_A_OPT_{name.upper()}")
+        _static_duplicate(shirt, candidate_positions[name], collections[DISPLAY_COLLECTIONS[name]], DISPLAY_OBJECTS[name])
     scene = bpy.context.scene
     scene.frame_start = 1
     scene.frame_end = 1
     scene.frame_set(1)
     scene["cloth2bones_static_equilibrium"] = True
+    scene["review_only_visual_checkpoint"] = True
     scene["dem_bones_executed"] = False
+    scene["bone_generation_executed"] = False
     scene["weight_generation_executed"] = False
+    scene["default_visible_collection"] = DEFAULT_VISIBLE_COLLECTION
     scene["source_blend_sha256"] = source_before["sha256"]
-    _set_collection_visibility(collections, "A_OPT_BALANCED")
-    preview_paths = _render_previews(collections, body_a, output_root / "previews")
-    _set_collection_visibility(collections, "A_OPT_BALANCED")
+    _set_collection_visibility(collections, DEFAULT_VISIBLE_COLLECTION)
     review_blend = output_root / "Taisofuku_StaticTeacher_Review.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(review_blend))
     if not review_blend.is_file() or review_blend.stat().st_size <= 0:
@@ -568,10 +526,12 @@ def main() -> None:
         "original_total_face_count": EXPECTED_SHIRT_FACES,
         "main_component": {"vertices": len(main_indices), "faces": len(main_faces), "unique_edges": len(main_edges)},
         "candidates": candidate_reports,
+        "review_exported": True,
+        "review_export_reason": "generated_for_visual_review_even_if_numeric_gate_failed",
         "review_blend": str(review_blend),
-        "previews": preview_paths,
+        "previews": [],
         "collections": list(COLLECTION_NAMES),
-        "default_visible_collection": "A_OPT_BALANCED",
+        "default_visible_collection": DEFAULT_VISIBLE_COLLECTION,
         "dem_bones_executed": False,
         "bone_generation_executed": False,
         "weight_generation_executed": False,
@@ -579,9 +539,7 @@ def main() -> None:
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     if not source_unchanged:
         raise RuntimeError("Source Blend changed during static review generation")
-    if len(preview_paths) != 16:
-        raise RuntimeError(f"Expected 16 previews, got {len(preview_paths)}")
-    print(json.dumps({"report": str(report_path), "review_blend": str(review_blend), "preview_count": len(preview_paths), "source_unchanged": source_unchanged, "valid_candidates": valid_candidates}, indent=2))
+    print(json.dumps({"report": str(report_path), "review_blend": str(review_blend), "preview_count": 0, "source_unchanged": source_unchanged, "review_export_candidates": review_export_candidates}, indent=2))
 
 
 if __name__ == "__main__":

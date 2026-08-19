@@ -63,10 +63,6 @@ if (-not (Test-Path -LiteralPath $report -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $reviewBlend -PathType Leaf)) {
     throw "Review Blend was not created: $reviewBlend"
 }
-$previewCount = @(Get-ChildItem -LiteralPath (Join-Path $OutputRoot 'previews') -Filter '*.png' -File).Count
-if ($previewCount -ne 16) {
-    throw "Expected 16 preview PNGs, found $previewCount"
-}
 
 Invoke-BlenderScript -Script $verifier -Arguments @('--source', $SourceBlend, '--blend', $reviewBlend, '--report', $report) -Label 'verify'
-Write-Output 'PASS: Taisofuku static-equilibrium review Blend, report, topology, source immutability, and 16 previews verified.'
+Write-Output 'PASS: Taisofuku static review Blend generated for user visual inspection.'

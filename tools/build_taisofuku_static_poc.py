@@ -13,13 +13,14 @@ from pathlib import Path
 import bpy
 import numpy as np
 from mathutils import Matrix, Vector
+from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from cloth2bones.static_equilibrium import EquilibriumParameters, EquilibriumResult, optimize_static_equilibrium  # noqa: E402
+from cloth2bones.pbd_settle import PBDSettleParameters, PBDSettleResult, settle_pbd  # noqa: E402
 from tools.export_ryuon_md_motion import _rest_matrices, _set_motion_pose, _set_rest_pose  # noqa: E402
 
 DOWNLOADS_ROOT = Path("D:/") / "Users" / "Origin" / "Downloads"
@@ -31,14 +32,16 @@ EXPECTED_SHIRT_VERTICES = 121471
 EXPECTED_SHIRT_FACES = 115103
 EXPECTED_MAIN_VERTICES = 87005
 EXPECTED_MAIN_FACES = 86865
+CLEARANCE = 0.0015
+COLLISION_QUERY_MAX_DISTANCE = 0.08
 MAIN_OBJECT = "Taisofuku_Shirt"
 BODY_OBJECT = "ComeBody"
 ARMATURE_OBJECT = "ComeBody_Armature"
 REQUIRED_GROUPS = ("Spine", "Chest", "Shoulder.L", "Shoulder.R", "Upper_arm.L", "Upper_arm.R")
 PARAMETERS = {
-    "stiff": EquilibriumParameters(edge=8000.0, smooth=12.0, tether=120.0, gravity=0.30, collision=50000.0),
-    "balanced": EquilibriumParameters(edge=5000.0, smooth=6.0, tether=60.0, gravity=0.45, collision=50000.0),
-    "soft": EquilibriumParameters(edge=3000.0, smooth=3.0, tether=30.0, gravity=0.60, collision=50000.0),
+    "stiff": PBDSettleParameters(90, 1.0 / 60.0, 6, 3, 8, -9.81, 0.92, 0.90, 0.30, 0.16),
+    "balanced": PBDSettleParameters(90, 1.0 / 60.0, 6, 3, 8, -9.81, 0.92, 0.90, 0.12, 0.10),
+    "soft": PBDSettleParameters(90, 1.0 / 60.0, 6, 3, 8, -9.81, 0.92, 0.90, 0.04, 0.06),
 }
 BODY_COLLECTION = "00_RYUON_A_BODY"
 DEFAULT_VISIBLE_COLLECTION = "03_A_REVIEW_BALANCED"
@@ -243,23 +246,107 @@ def _anchor_weights(shirt: bpy.types.Object, main_indices: np.ndarray, main_rest
     return np.clip(anchor, 0.15, 1.0)
 
 
-def _collision_associations(body: bpy.types.Object, main_base_a: np.ndarray, depsgraph: bpy.types.Depsgraph) -> tuple[np.ndarray, np.ndarray]:
-    body_positions, body_normals = _world_mesh_data(body, depsgraph, with_normals=True)
-    assert body_normals is not None
-    centroid = body_positions.mean(axis=0)
-    outward = np.sum(body_normals * (body_positions - centroid), axis=1) < 0.0
-    body_normals[outward] *= -1.0
-    tree = KDTree(len(body_positions))
-    for index, point in enumerate(body_positions):
-        tree.insert(Vector(point), index)
-    tree.balance()
-    collision_points = np.empty_like(main_base_a)
-    collision_normals = np.empty_like(main_base_a)
-    for index, point in enumerate(main_base_a):
-        _, body_index, _ = tree.find(Vector(point))
-        collision_points[index] = body_positions[body_index]
-        collision_normals[index] = body_normals[body_index]
-    return collision_points, collision_normals
+def _bend_pairs(mesh: bpy.types.Mesh, main_faces: list[int], global_to_local: np.ndarray) -> np.ndarray:
+    edge_opposites: dict[tuple[int, int], list[int]] = {}
+    for face_index in main_faces:
+        vertices = tuple(int(index) for index in mesh.polygons[face_index].vertices)
+        if len(vertices) != 3:
+            continue
+        for left, right, opposite in ((vertices[0], vertices[1], vertices[2]), (vertices[1], vertices[2], vertices[0]), (vertices[2], vertices[0], vertices[1])):
+            edge = (left, right) if left < right else (right, left)
+            edge_opposites.setdefault(edge, []).append(opposite)
+    pairs: set[tuple[int, int]] = set()
+    for opposites in edge_opposites.values():
+        if len(opposites) != 2 or opposites[0] == opposites[1]:
+            continue
+        left = int(global_to_local[opposites[0]])
+        right = int(global_to_local[opposites[1]])
+        if left < 0 or right < 0 or left == right:
+            continue
+        pairs.add((left, right) if left < right else (right, left))
+    return np.asarray(sorted(pairs), dtype=np.int64).reshape((-1, 2)) if pairs else np.empty((0, 2), dtype=np.int64)
+
+
+def _world_mesh_topology(obj: bpy.types.Object, depsgraph: bpy.types.Depsgraph) -> tuple[np.ndarray, list[tuple[int, ...]]]:
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    try:
+        vertices = np.asarray(
+            [[float(value) for value in evaluated.matrix_world @ vertex.co] for vertex in mesh.vertices],
+            dtype=np.float64,
+        )
+        polygons = [tuple(int(index) for index in polygon.vertices) for polygon in mesh.polygons]
+        return vertices, polygons
+    finally:
+        evaluated.to_mesh_clear()
+
+
+def _build_body_bvh(body: bpy.types.Object, depsgraph: bpy.types.Depsgraph) -> BVHTree:
+    vertices, polygons = _world_mesh_topology(body, depsgraph)
+    if not len(polygons):
+        raise RuntimeError("ComeBody evaluated mesh has no polygons for collision BVH")
+    return BVHTree.FromPolygons([Vector(vertex) for vertex in vertices], polygons, all_triangles=False)
+
+
+def _body_collision_projector(body_bvh: BVHTree):
+    def project(positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        projected = np.asarray(positions, dtype=np.float64).copy()
+        corrected = np.zeros(len(projected), dtype=bool)
+        for _ in range(3):
+            pass_corrected = np.zeros(len(projected), dtype=bool)
+            for index, position in enumerate(projected):
+                location, normal, _, _ = body_bvh.find_nearest(Vector(position), COLLISION_QUERY_MAX_DISTANCE)
+                if location is None or normal is None:
+                    continue
+                normal_vector = Vector(normal)
+                if normal_vector.length <= 1.0e-12:
+                    raise RuntimeError("Body collision BVH returned a zero-length normal")
+                normal_vector.normalize()
+                signed = float((Vector(position) - location).dot(normal_vector))
+                if signed < CLEARANCE:
+                    projected[index] = np.asarray(location + normal_vector * CLEARANCE, dtype=np.float64)
+                    pass_corrected[index] = True
+            corrected |= pass_corrected
+            if not np.any(pass_corrected):
+                break
+        return projected, corrected
+
+    return project
+
+
+def _collision_metrics(body_bvh: BVHTree, positions: np.ndarray) -> dict[str, float | int]:
+    signed_values = []
+    no_hit_count = 0
+    for position in positions:
+        location, normal, _, _ = body_bvh.find_nearest(Vector(position), COLLISION_QUERY_MAX_DISTANCE)
+        if location is None or normal is None:
+            no_hit_count += 1
+            continue
+        normal_vector = Vector(normal)
+        if normal_vector.length <= 1.0e-12:
+            raise RuntimeError("Body collision BVH returned a zero-length normal")
+        normal_vector.normalize()
+        signed_values.append(float((Vector(position) - location).dot(normal_vector)))
+    values = np.asarray(signed_values, dtype=np.float64)
+    if len(values):
+        signed_min = float(np.min(values))
+        signed_p01 = float(np.percentile(values, 1.0))
+        signed_mean = float(np.mean(values))
+    else:
+        signed_min = None
+        signed_p01 = None
+        signed_mean = None
+    return {
+        "queried_count": len(positions),
+        "no_hit_count": no_hit_count,
+        "signed_min_m": signed_min,
+        "signed_p01_m": signed_p01,
+        "signed_mean_m": signed_mean,
+        "count_signed_lt_0": int(np.count_nonzero(values < 0.0)),
+        "count_signed_lt_minus_0_0005": int(np.count_nonzero(values < -0.0005)),
+        "count_signed_lt_minus_0_001": int(np.count_nonzero(values < -0.001)),
+        "count_signed_lt_minus_0_002": int(np.count_nonzero(values < -0.002)),
+    }
 
 
 def _propagate_to_full_mesh(
@@ -289,74 +376,95 @@ def _propagate_to_full_mesh(
     return final_positions
 
 
-def _edge_metrics(rest: np.ndarray, positions: np.ndarray, edges: np.ndarray) -> dict[str, float]:
+def _edge_metrics(rest: np.ndarray, positions: np.ndarray, edges: np.ndarray) -> dict[str, float | int]:
     rest_lengths = np.linalg.norm(rest[edges[:, 0]] - rest[edges[:, 1]], axis=1)
     current_lengths = np.linalg.norm(positions[edges[:, 0]] - positions[edges[:, 1]], axis=1)
-    strain = (current_lengths - rest_lengths) / np.maximum(rest_lengths, 1.0e-12)
+    included = rest_lengths >= 0.0005
+    if not np.any(included):
+        return {
+            "included_count": 0,
+            "rms": 0.0,
+            "p95_absolute": 0.0,
+            "max_absolute": 0.0,
+            "length_error_rms_m": 0.0,
+            "length_error_p95_m": 0.0,
+            "length_error_max_m": 0.0,
+        }
+    rest_lengths = rest_lengths[included]
+    current_lengths = current_lengths[included]
+    length_error = current_lengths - rest_lengths
+    strain = length_error / rest_lengths
     absolute = np.abs(strain)
+    absolute_length_error = np.abs(length_error)
     return {
+        "included_count": int(np.count_nonzero(included)),
         "rms": float(np.sqrt(np.mean(strain * strain))),
         "p95_absolute": float(np.percentile(absolute, 95.0)),
         "max_absolute": float(np.max(absolute)),
+        "length_error_rms_m": float(np.sqrt(np.mean(length_error * length_error))),
+        "length_error_p95_m": float(np.percentile(absolute_length_error, 95.0)),
+        "length_error_max_m": float(np.max(absolute_length_error)),
     }
 
 
 def _candidate_report(
     name: str,
-    parameters: EquilibriumParameters,
-    result: EquilibriumResult,
+    parameters: PBDSettleParameters,
+    result: PBDSettleResult,
     main_rest: np.ndarray,
     main_base_a: np.ndarray,
     main_edges: np.ndarray,
-    collision_points: np.ndarray,
-    collision_normals: np.ndarray,
+    bend_pairs: np.ndarray,
+    hard_pin_mask: np.ndarray,
+    collision_metrics: dict[str, object],
+    collision_eligibility_metrics: dict[str, object],
+    final_full_positions: np.ndarray,
     output_vertices: int,
     output_faces: int,
 ) -> dict[str, object]:
     correction_magnitude = np.linalg.norm(result.displacement, axis=1)
-    signed_clearance = np.sum((result.positions - collision_points) * collision_normals, axis=1) - parameters.clearance
-    nan_count = int(np.isnan(result.positions).sum() + np.isnan(result.displacement).sum())
-    inf_count = int(np.isinf(result.positions).sum() + np.isinf(result.displacement).sum())
+    nan_count = int(np.isnan(final_full_positions).sum() + np.isnan(result.displacement).sum() + np.isnan(result.velocity).sum())
+    inf_count = int(np.isinf(final_full_positions).sum() + np.isinf(result.displacement).sum() + np.isinf(result.velocity).sum())
     edge_strain = _edge_metrics(main_rest, result.positions, main_edges)
     topology_preserved = output_vertices == EXPECTED_SHIRT_VERTICES and output_faces == EXPECTED_SHIRT_FACES
-    review_export_eligible = nan_count == 0 and inf_count == 0 and topology_preserved
-    valid_numeric = (
+    hard_pin_error = float(np.max(np.linalg.norm(result.positions[hard_pin_mask] - main_base_a[hard_pin_mask], axis=1))) if np.any(hard_pin_mask) else 0.0
+    review_export_eligible = (
         nan_count == 0
         and inf_count == 0
-        and output_vertices == EXPECTED_SHIRT_VERTICES
-        and output_faces == EXPECTED_SHIRT_FACES
+        and topology_preserved
+        and hard_pin_error <= 1.0e-8
+        and collision_eligibility_metrics["count_signed_lt_minus_0_001"] == 0
+    )
+    valid_numeric = (
+        review_export_eligible
         and float(np.max(correction_magnitude)) <= 0.10
         and edge_strain["max_absolute"] <= 0.20
     )
     numeric_warnings = []
     if float(np.max(correction_magnitude)) > 0.10:
-        numeric_warnings.append("max_correction_displacement_exceeds_0.10_m")
+        numeric_warnings.append("max_displacement_exceeds_0.10_m")
     if edge_strain["max_absolute"] > 0.20:
         numeric_warnings.append("max_absolute_edge_strain_exceeds_0.20")
-    weighted_energies = {
-        "edge": parameters.edge * result.energies["edge"],
-        "smooth": parameters.smooth * result.energies["smooth"],
-        "tether": parameters.tether * result.energies["tether"],
-        "gravity": parameters.gravity * result.energies["gravity"],
-        "collision": parameters.collision * result.energies["collision"],
-    }
     return {
         "name": name,
         "display_collection": DISPLAY_COLLECTIONS[name],
         "display_object": DISPLAY_OBJECTS[name],
         "parameter_set": {
-            "edge": parameters.edge,
-            "smooth": parameters.smooth,
-            "tether": parameters.tether,
+            "frames": parameters.frames,
+            "dt": parameters.dt,
+            "solver_iterations": parameters.solver_iterations,
+            "collision_interval": parameters.collision_interval,
+            "final_projection_iterations": parameters.final_projection_iterations,
             "gravity": parameters.gravity,
-            "collision": parameters.collision,
-            "clearance": parameters.clearance,
+            "damping": parameters.damping,
+            "stretch_stiffness": parameters.stretch_stiffness,
+            "bend_stiffness": parameters.bend_stiffness,
+            "attachment_stiffness": parameters.attachment_stiffness,
+            "collision_clearance": CLEARANCE,
+            "collision_query_max_distance": COLLISION_QUERY_MAX_DISTANCE,
         },
-        "iterations": parameters.iterations,
-        "learning_rate": parameters.learning_rate,
-        "final_total_energy": result.total_energy,
-        "energy": result.energies,
-        "weighted_energy": weighted_energies,
+        "frames": result.frames,
+        "collision_projection_count": result.collision_projection_count,
         "correction_displacement": {
             "mean": float(np.mean(correction_magnitude)),
             "p50": float(np.percentile(correction_magnitude, 50.0)),
@@ -364,23 +472,22 @@ def _candidate_report(
             "max": float(np.max(correction_magnitude)),
         },
         "edge_strain": edge_strain,
-        "collision_signed_clearance": {
-            "min": float(np.min(signed_clearance)),
-            "p01": float(np.percentile(signed_clearance, 1.0)),
-            "mean": float(np.mean(signed_clearance)),
-            "count_lt_0": int(np.count_nonzero(signed_clearance < 0.0)),
-            "count_lt_minus_0_001": int(np.count_nonzero(signed_clearance < -0.001)),
-        },
+        "collision": collision_metrics,
+        "collision_eligibility": collision_eligibility_metrics,
         "nan_count": nan_count,
         "inf_count": inf_count,
         "output_vertices": output_vertices,
         "output_faces": output_faces,
         "topology_preserved": topology_preserved,
+        "hard_pin_count": int(np.count_nonzero(hard_pin_mask)),
+        "hard_pin_max_error_m": hard_pin_error,
+        "stretch_edge_count": len(main_edges),
+        "bend_pair_count": len(bend_pairs),
         "valid_numeric": valid_numeric,
         "review_export_eligible": review_export_eligible,
         "numeric_warnings": numeric_warnings,
         "numeric_gate": {
-            "max_correction_displacement_m": 0.10,
+            "max_displacement_m": 0.10,
             "max_absolute_edge_strain": 0.20,
         },
     }
@@ -437,10 +544,28 @@ def _static_duplicate(
     return result
 
 
-def _set_collection_visibility(collections: dict[str, bpy.types.Collection], active: str) -> None:
-    for name, collection in collections.items():
-        collection.hide_viewport = name != BODY_COLLECTION and name != active
-        collection.hide_render = name != BODY_COLLECTION and name != active
+def _set_layer_collection_visibility(layer_collection: bpy.types.LayerCollection) -> None:
+    for child in layer_collection.children:
+        child.exclude = False
+        child.hide_viewport = False
+        _set_layer_collection_visibility(child)
+
+
+def _set_review_visibility() -> None:
+    for name in COLLECTION_NAMES:
+        collection = bpy.data.collections[name]
+        collection.hide_viewport = False
+        collection.hide_render = False
+    _set_layer_collection_visibility(bpy.context.view_layer.layer_collection)
+    visible_objects = {
+        "Ryuon_A_Body_Static",
+        DISPLAY_OBJECTS["balanced"],
+    }
+    for name in ("Ryuon_A_Body_Static", *DISPLAY_OBJECTS.values()):
+        obj = bpy.data.objects[name]
+        obj.hide_viewport = False
+        obj.hide_render = False
+        obj.hide_set(name not in visible_objects)
 
 
 def _validate_source(source: Path) -> dict[str, object]:
@@ -497,20 +622,31 @@ def main() -> None:
     main_base_a = full_base_a[main_indices]
     if len(full_rest) != EXPECTED_SHIRT_VERTICES or len(full_base_a) != EXPECTED_SHIRT_VERTICES:
         raise RuntimeError("Evaluated Taisofuku_Shirt vertex count changed under the Armature modifier")
+    global_to_local = np.full(len(full_rest), -1, dtype=np.int64)
+    global_to_local[main_indices] = np.arange(len(main_indices), dtype=np.int64)
+    main_edges_local = global_to_local[main_edges]
+    if np.any(main_edges_local < 0):
+        raise RuntimeError("Main component edge remapping produced an invalid local index")
+    bend_pairs = _bend_pairs(shirt.data, main_faces, global_to_local)
     anchor = _anchor_weights(shirt, main_indices, main_rest)
-    collision_points, collision_normals = _collision_associations(body, main_base_a, depsgraph)
+    attachment = np.clip((anchor - 0.15) / 0.85, 0.0, 1.0)
+    hard_pin_mask = anchor >= 0.999
+    body_bvh = _build_body_bvh(body, depsgraph)
+    collision_projector = _body_collision_projector(body_bvh)
+    baseline_collision = _collision_metrics(body_bvh, main_base_a)
 
     candidate_reports: dict[str, dict[str, object]] = {}
     candidate_positions: dict[str, np.ndarray] = {}
     for name, parameters in PARAMETERS.items():
-        result = optimize_static_equilibrium(
+        result = settle_pbd(
             main_rest,
             main_base_a,
-            main_edges,
-            collision_points,
-            collision_normals,
-            anchor,
+            main_edges_local,
+            bend_pairs,
+            attachment,
+            hard_pin_mask,
             parameters,
+            collision_projector,
         )
         candidate_positions[name] = _propagate_to_full_mesh(full_rest, full_base_a, main_indices, main_rest, result.displacement)
         candidate_reports[name] = _candidate_report(
@@ -519,9 +655,12 @@ def main() -> None:
             result,
             main_rest,
             main_base_a,
-            main_edges,
-            collision_points,
-            collision_normals,
+            main_edges_local,
+            bend_pairs,
+            hard_pin_mask,
+            _collision_metrics(body_bvh, result.positions),
+            _collision_metrics(body_bvh, result.positions[~hard_pin_mask]),
+            candidate_positions[name],
             EXPECTED_SHIRT_VERTICES,
             EXPECTED_SHIRT_FACES,
         )
@@ -534,7 +673,7 @@ def main() -> None:
         and source_after_solver.st_mtime_ns == source_before["mtime_ns"]
     )
     if not source_unchanged:
-        raise RuntimeError("Source Blend changed during static equilibrium optimization")
+        raise RuntimeError("Source Blend changed during PBD settling")
     review_export_candidates = [name for name, report in candidate_reports.items() if report["review_export_eligible"]]
     report_path = output_root / "static_equilibrium_report.json"
     if not review_export_candidates:
@@ -544,7 +683,8 @@ def main() -> None:
                     "source": {**source_before, "sha256_after": source_hash_after_solver, "size_after": source_after_solver.st_size, "mtime_ns_after": source_after_solver.st_mtime_ns, "unchanged": source_unchanged},
                     "original_total_vertex_count": EXPECTED_SHIRT_VERTICES,
                     "original_total_face_count": EXPECTED_SHIRT_FACES,
-                    "main_component": {"vertices": len(main_indices), "faces": len(main_faces)},
+                    "main_component": {"vertices": len(main_indices), "faces": len(main_faces), "stretch_edge_count": len(main_edges_local), "bend_pair_count": len(bend_pairs), "hard_pin_count": int(np.count_nonzero(hard_pin_mask))},
+                    "baseline_collision": baseline_collision,
                     "pose_verification": pose_verification,
                     "candidates": candidate_reports,
                     "collections": list(COLLECTION_NAMES),
@@ -580,7 +720,7 @@ def main() -> None:
     scene["weight_generation_executed"] = False
     scene["default_visible_collection"] = DEFAULT_VISIBLE_COLLECTION
     scene["source_blend_sha256"] = source_before["sha256"]
-    _set_collection_visibility(collections, DEFAULT_VISIBLE_COLLECTION)
+    _set_review_visibility()
     review_blend = output_root / "Taisofuku_StaticTeacher_Review.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(review_blend))
     if not review_blend.is_file() or review_blend.stat().st_size <= 0:
@@ -602,7 +742,8 @@ def main() -> None:
         },
         "original_total_vertex_count": EXPECTED_SHIRT_VERTICES,
         "original_total_face_count": EXPECTED_SHIRT_FACES,
-        "main_component": {"vertices": len(main_indices), "faces": len(main_faces), "unique_edges": len(main_edges)},
+        "main_component": {"vertices": len(main_indices), "faces": len(main_faces), "stretch_edge_count": len(main_edges_local), "bend_pair_count": len(bend_pairs), "hard_pin_count": int(np.count_nonzero(hard_pin_mask))},
+        "baseline_collision": baseline_collision,
         "pose_verification": pose_verification,
         "candidates": candidate_reports,
         "review_exported": True,

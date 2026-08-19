@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from collections import Counter
 from pathlib import Path
 
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Matrix, Vector
 from mathutils.kdtree import KDTree
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,6 +154,56 @@ def _world_mesh_data(obj: bpy.types.Object, depsgraph: bpy.types.Depsgraph, with
         return positions, np.asarray(normals, dtype=np.float64)
     finally:
         evaluated.to_mesh_clear()
+
+
+def _pose_directions(armature: bpy.types.Object) -> dict[str, np.ndarray]:
+    directions = {}
+    for bone_name in ("Upper_arm.L", "Upper_arm.R"):
+        pose_bone = armature.pose.bones.get(bone_name)
+        if pose_bone is None:
+            raise RuntimeError(f"ComeBody_Armature is missing pose bone {bone_name!r}")
+        direction = pose_bone.tail - pose_bone.head
+        if direction.length <= 1.0e-12:
+            raise RuntimeError(f"Pose bone {bone_name!r} has zero-length direction")
+        directions[bone_name] = np.asarray([float(value) for value in direction.normalized()], dtype=np.float64)
+    return directions
+
+
+def _pose_direction_angles(directions: dict[str, np.ndarray]) -> dict[str, float]:
+    down = np.asarray((0.0, 0.0, -1.0), dtype=np.float64)
+    angles = {}
+    for bone_name, direction in directions.items():
+        dot = max(-1.0, min(1.0, float(np.dot(direction, down))))
+        angles[bone_name] = math.degrees(math.acos(dot))
+    return angles
+
+
+def _verify_builder_pose(
+    full_body_t: np.ndarray,
+    full_body_a: np.ndarray,
+    pose_directions: dict[str, np.ndarray],
+) -> dict[str, object]:
+    angles = _pose_direction_angles(pose_directions)
+    body_pose_delta = np.linalg.norm(full_body_a - full_body_t, axis=1)
+    nan_count = int(np.isnan(body_pose_delta).sum())
+    inf_count = int(np.isinf(body_pose_delta).sum())
+    pose_verified = all(11.5 <= angles[name] <= 12.5 for name in ("Upper_arm.L", "Upper_arm.R"))
+    body_changed = (
+        nan_count == 0
+        and inf_count == 0
+        and float(np.max(body_pose_delta)) > 0.05
+    )
+    if not pose_verified:
+        raise RuntimeError(f"Upper arm pose angle is outside the requested A-pose range: {angles}")
+    if not body_changed:
+        raise RuntimeError("Body evaluated geometry did not change to the requested A pose")
+    return {
+        "upper_arm_left_angle_to_down_deg": angles["Upper_arm.L"],
+        "upper_arm_right_angle_to_down_deg": angles["Upper_arm.R"],
+        "body_t_to_a_rms_m": float(np.sqrt(np.mean(body_pose_delta * body_pose_delta))),
+        "body_t_to_a_max_m": float(np.max(body_pose_delta)),
+        "builder_pose_verified": True,
+    }
 
 
 def _group_weights(shirt: bpy.types.Object) -> dict[str, np.ndarray]:
@@ -343,6 +394,22 @@ def _new_collection(name: str) -> bpy.types.Collection:
     return collection
 
 
+def _mesh_without_shape_keys(source_mesh: bpy.types.Mesh, name: str) -> bpy.types.Mesh:
+    mesh = bpy.data.meshes.new(f"{name}_Mesh")
+    mesh.from_pydata(
+        [vertex.co.copy() for vertex in source_mesh.vertices],
+        [tuple(edge.vertices) for edge in source_mesh.edges],
+        [tuple(polygon.vertices) for polygon in source_mesh.polygons],
+    )
+    for material in source_mesh.materials:
+        mesh.materials.append(material)
+    for destination, source_polygon in zip(mesh.polygons, source_mesh.polygons, strict=True):
+        destination.material_index = source_polygon.material_index
+        destination.use_smooth = source_polygon.use_smooth
+    mesh.update()
+    return mesh
+
+
 def _static_duplicate(
     source: bpy.types.Object,
     world_positions: np.ndarray,
@@ -352,8 +419,11 @@ def _static_duplicate(
     if len(world_positions) != len(source.data.vertices):
         raise RuntimeError(f"Static duplicate vertex mismatch for {name}: {len(world_positions)} != {len(source.data.vertices)}")
     result = source.copy()
-    result.data = source.data.copy()
+    result.data = _mesh_without_shape_keys(source.data, name)
     result.name = name
+    result.parent = None
+    result.matrix_parent_inverse = Matrix.Identity(4)
+    result.matrix_world = Matrix.Identity(4)
     result.animation_data_clear()
     for modifier in list(result.modifiers):
         result.modifiers.remove(modifier)
@@ -361,9 +431,8 @@ def _static_duplicate(
     result.hide_viewport = False
     result.hide_render = False
     result.hide_set(False)
-    inverse = result.matrix_world.inverted()
     for index, point in enumerate(world_positions):
-        result.data.vertices[index].co = inverse @ Vector(point)
+        result.data.vertices[index].co = Vector(point)
     result.data.update()
     return result
 
@@ -413,9 +482,17 @@ def main() -> None:
     rest_matrices = _rest_matrices(armature)
     depsgraph = bpy.context.evaluated_depsgraph_get()
     _set_rest_pose(armature, rest_matrices)
+    bpy.context.view_layer.update()
+    full_body_t, _ = _world_mesh_data(body, depsgraph)
     full_rest, _ = _world_mesh_data(shirt, depsgraph)
     _set_motion_pose(armature, rest_matrices, {"Upper_arm.L", "Upper_arm.R"}, 1.0)
+    bpy.context.view_layer.update()
+    full_body_a, _ = _world_mesh_data(body, depsgraph)
     full_base_a, _ = _world_mesh_data(shirt, depsgraph)
+    if len(full_body_t) != EXPECTED_BODY_VERTICES or len(full_body_a) != EXPECTED_BODY_VERTICES:
+        raise RuntimeError("Body evaluated vertex count changed under the Armature modifier")
+    pose_directions = _pose_directions(armature)
+    pose_verification = _verify_builder_pose(full_body_t, full_body_a, pose_directions)
     main_rest = full_rest[main_indices]
     main_base_a = full_base_a[main_indices]
     if len(full_rest) != EXPECTED_SHIRT_VERTICES or len(full_base_a) != EXPECTED_SHIRT_VERTICES:
@@ -468,6 +545,7 @@ def main() -> None:
                     "original_total_vertex_count": EXPECTED_SHIRT_VERTICES,
                     "original_total_face_count": EXPECTED_SHIRT_FACES,
                     "main_component": {"vertices": len(main_indices), "faces": len(main_faces)},
+                    "pose_verification": pose_verification,
                     "candidates": candidate_reports,
                     "collections": list(COLLECTION_NAMES),
                     "default_visible_collection": DEFAULT_VISIBLE_COLLECTION,
@@ -487,7 +565,7 @@ def main() -> None:
         obj.hide_render = True
         obj.hide_set(True)
     collections = {name: _new_collection(name) for name in COLLECTION_NAMES}
-    _static_duplicate(body, _world_mesh_data(body, depsgraph)[0], collections[BODY_COLLECTION], "Ryuon_A_Body_Static")
+    _static_duplicate(body, full_body_a, collections[BODY_COLLECTION], "Ryuon_A_Body_Static")
     _static_duplicate(shirt, full_base_a, collections[DISPLAY_COLLECTIONS["baseline"]], DISPLAY_OBJECTS["baseline"])
     for name in PARAMETERS:
         _static_duplicate(shirt, candidate_positions[name], collections[DISPLAY_COLLECTIONS[name]], DISPLAY_OBJECTS[name])
@@ -525,6 +603,7 @@ def main() -> None:
         "original_total_vertex_count": EXPECTED_SHIRT_VERTICES,
         "original_total_face_count": EXPECTED_SHIRT_FACES,
         "main_component": {"vertices": len(main_indices), "faces": len(main_faces), "unique_edges": len(main_edges)},
+        "pose_verification": pose_verification,
         "candidates": candidate_reports,
         "review_exported": True,
         "review_export_reason": "generated_for_visual_review_even_if_numeric_gate_failed",
